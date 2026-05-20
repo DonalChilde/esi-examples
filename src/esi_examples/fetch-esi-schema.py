@@ -150,13 +150,13 @@ if __name__ == "__main__":
         "--output-dir",
         type=Path,
         default=None,
-        help="The output directory to save the ESI schema to (default: stdout)",
+        help="The output directory to save the ESI schema to. If not provided, will print to stdout.",
     )
     parser.add_argument(
         "--file_name",
         type=str,
         default=None,
-        help="The output file name to save the converted result to (default: stdout)",
+        help="The output file name to save the converted result to. Requires --output-dir to be set. If not provided, will default to 'esi_schema_{compatibility_date}_{fetch_timestamp_nano}.json'",
     )
     parser.add_argument(
         "--indent",
