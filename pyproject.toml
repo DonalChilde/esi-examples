@@ -10,6 +10,7 @@ dependencies = []
 dev = [
     "httpx2>=2.0.0",
     "pyyaml>=6.0.3",
+    "rich>=15.0.0",
     "ruff>=0.15.12",
 ]
 
