@@ -13,6 +13,7 @@ import argparse
 from typing import Any
 import httpx2
 from pathlib import Path
+from datetime import datetime, UTC
 
 
 ESI_SCHEMA_URL = "https://esi.evetech.net/meta/openapi.json"
@@ -77,37 +78,62 @@ def resolve_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return _resolve_internal_refs(schema, schema)
 
 
-def fetch_esi_schema(url: str | None = None) -> dict[str, Any]:
+def verify_compatibility_date(date_str: str | None) -> str:
+    """Verify the provided compatibility date string is in the correct format (YYYY-MM-DD).
+
+    Args:
+        date_str (str|None): The compatibility date string to verify.
+    Returns:
+        str: The verified compatibility date string, or the current date in UTC if None was provided.
+    Raises:
+        ValueError: If the provided date string is not in the correct format.
+    """
+    if date_str is not None:
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+            return date_str
+        except ValueError:
+            raise ValueError(
+                f"Invalid compatibility date format: {date_str}. Expected format: YYYY-MM-DD"
+            )
+    else:
+        return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def fetch_esi_schema(
+    url: str | None = None, compatibility_date: str | None = None
+) -> dict[str, Any]:
     """Fetch the ESI schema from the specified URL.
 
     Args:
         url (str | None): The URL to fetch the ESI schema from. Defaults to ESI_SCHEMA_URL.
+        compatibility_date (str | None): The compatibility date for the ESI schema. Defaults to current date UTC. If provided, will attempt to fetch the schema from the ESI schema archive for that date (format: YYYY-MM-DD).
 
     Returns:
         dict[str, Any]: The parsed JSON schema as a dictionary.
     """
+    compatibility_date = verify_compatibility_date(compatibility_date)
     if url is None:
         url = ESI_SCHEMA_URL
     with httpx2.Client() as client:
-        response = client.get(url)
+        response = client.get(url, params={"compatibility_date": compatibility_date})
         response.raise_for_status()
         return response.json()
 
 
 if __name__ == "__main__":
-    # argparse cli to script.
-    # Features:
-    # - Option to specify a custom schema URL (default to ESI_SCHEMA_URL)
-    # - Option to specify an output file to save the resolved schema (default to stdout)
-    # - default non colorized output, can be used with a pipe. Flag to use rich for colorized output (only if output is stdout)
-    # - option to output raw schema, or resolved schema when using plain or rich output to stdout
-    # - option to save both version to file, by accepting a output directory. Will use a default file name.
     parser = argparse.ArgumentParser(description="Fetch and resolve the ESI schema.")
     parser.add_argument(
         "--schema-url",
         type=str,
         default=ESI_SCHEMA_URL,
         help="The URL to fetch the ESI schema from (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--compatibility-date",
+        type=str,
+        default=None,
+        help="The compatibility date for the ESI schema. Defaults to current date UTC. If provided, will attempt to fetch the schema from the ESI schema archive for that date (format: YYYY-MM-DD).",
     )
     parser.add_argument(
         "--color",
@@ -131,19 +157,32 @@ if __name__ == "__main__":
         help="The directory to save both raw and resolved schemas to (default: None). Outputs to file instead of stdout with default file names.",
     )
     args = parser.parse_args()
-    schema = fetch_esi_schema(args.schema_url)
+    requested_compatibility_date = verify_compatibility_date(args.compatibility_date)
+    schema = fetch_esi_schema(args.schema_url, requested_compatibility_date)
+    fetch_timestamp = str(datetime.now(UTC).timestamp())
+    reported_compatibility_date = schema.get("info", {}).get("version", "unknown")
     resolved_schema = resolve_schema(schema)
     import json
     from yaml import safe_dump
 
     if args.output_dir:
+        print(
+            f"Requested latest ESI schema with compatibility date: {requested_compatibility_date}"
+        )
+        print(
+            f"Received ESI schema with reported compatibility date: {reported_compatibility_date}"
+        )
         output_dir_path = Path(args.output_dir)
         output_dir_path.mkdir(parents=True, exist_ok=True)
         raw_path = output_dir_path / (
-            "esi_schema_raw.yaml" if args.yaml else "esi_schema_raw.json"
+            f"esi_schema_raw-{reported_compatibility_date}-{fetch_timestamp}.yaml"
+            if args.yaml
+            else f"esi_schema_raw-{reported_compatibility_date}-{fetch_timestamp}.json"
         )
         resolved_path = output_dir_path / (
-            "esi_schema_resolved.yaml" if args.yaml else "esi_schema_resolved.json"
+            f"esi_schema_resolved-{reported_compatibility_date}-{fetch_timestamp}.yaml"
+            if args.yaml
+            else f"esi_schema_resolved-{reported_compatibility_date}-{fetch_timestamp}.json"
         )
         with open(raw_path, "w") as f:
             if args.yaml:
@@ -155,8 +194,8 @@ if __name__ == "__main__":
                 safe_dump(resolved_schema, f)
             else:
                 json.dump(resolved_schema, f, indent=2)
-        print(f"Saved raw schema to {raw_path}")
-        print(f"Saved resolved schema to {resolved_path}")
+        print(f"Saved raw schema to {raw_path.resolve()}")
+        print(f"Saved resolved schema to {resolved_path.resolve()}")
     else:
         output_data = schema if args.raw else resolved_schema
 
@@ -164,10 +203,10 @@ if __name__ == "__main__":
             from rich.console import Console
 
             console = Console()
-            console.print(f"[bold green]ESI Schema from {args.schema_url}[/bold green]")
+            console.print(f"[bold green]ESI Schema from {args.schema_url} for requested Compatibility Date: {requested_compatibility_date}[/bold green]")
             output_format = "YAML" if args.yaml else "JSON"
             console.print(
-                f"[bold blue]Outputting {'raw' if args.raw else 'resolved'} schema in {output_format} format[/bold blue]"
+                f"[bold blue]Outputting {'raw' if args.raw else 'resolved'} schema in {output_format} format with received Compatibility Date: {reported_compatibility_date}[/bold blue]"
             )
             if args.yaml:
                 from rich.syntax import Syntax
