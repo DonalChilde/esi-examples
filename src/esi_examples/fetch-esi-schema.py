@@ -25,9 +25,10 @@ ESI_SCHEMA_URL = "https://esi.evetech.net/meta/openapi.json"
 
 
 class TimestampedSchema(TypedDict):
+    """The ESI schema along with the nanosecond timestamp of when it was fetched."""
+
     schema: dict[str, Any]
     fetch_timestamp_nano: int
-    """The ESI schema along with the nanosecond timestamp of when it was fetched."""
 
 
 def _resolve_internal_refs(parent: dict[str, Any], child: Any) -> Any:
