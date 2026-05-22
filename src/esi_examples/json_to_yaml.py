@@ -4,10 +4,8 @@
 #     "pyyaml>=6.0.3",
 # ]
 # ///
-import argparse
+
 import json
-import sys
-from pathlib import Path
 
 from yaml import safe_dump
 
@@ -31,13 +29,10 @@ def json_to_yaml(json_string: str, indent: int = 2) -> str:
 
 
 if __name__ == "__main__":
-    # argparse cli to script
-    # Features:
-    # - default to reading JSON input from stdin (piped input), but allow an option to specify an input file instead
-    # - default to writing YAML output to stdout, but allow an option to specify an output file instead
-    # - Option to specify an input JSON file (default to stdin)
-    # - Option to specify an output YAML file (default to stdout)
-    # - Option to specify indentation level (default to 2 spaces)
+    import argparse
+    import sys
+    from pathlib import Path
+
     parser = argparse.ArgumentParser(description="Convert JSON to YAML.")
     parser.add_argument(
         "infile",
