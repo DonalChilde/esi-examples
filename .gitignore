@@ -1,5 +1,7 @@
 # Project specific gitignore file.
 dev-data/
+dev-secrets/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

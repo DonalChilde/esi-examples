@@ -1,6 +1,25 @@
-import httpx2
+import logging
+from typing import Any, Sequence
 
-from esi_examples.models.auth import OauthTokenTD
+import httpx2
+from jwt import ExpiredSignatureError, PyJWKClient, decode, get_unverified_header
+
+from esi_examples.models.auth import OauthTokenTD, ValidatedTokenTD
+
+logger = logging.getLogger(__name__)
+
+JWKS_URI = "https://login.eveonline.com/oauth/jwks"
+"""The URL to fetch the JSON Web Key Set (JWKS) for validating JWT tokens."""
+AUDIENCE = "EVE Online"
+"""The expected audience for the JWT tokens."""
+ISSUER = "https://login.eveonline.com"
+"""The expected issuer for the JWT tokens."""
+METADATA_ENDPOINT = "https://login.eveonline.com/.well-known/oauth-authorization-server"
+"""The URL to fetch the OpenID Connect metadata, which includes the authorization and token endpoints."""
+AUTHORIZATION_ENDPOINT = "https://login.eveonline.com/v2/oauth/authorize"
+"""The URL to redirect the user to for authentication."""
+TOKEN_ENDPOINT = "https://login.eveonline.com/v2/oauth/token"
+"""The URL to exchange the authorization code for an access token and refresh token."""
 
 
 def request_token(
@@ -48,6 +67,32 @@ def refresh_token(
     response.raise_for_status()
     result = response.json()
     return result
+
+
+def revoke_refresh_token(
+    refresh_token: str,
+    revocation_endpoint: str,
+    client_id: str,
+    user_agent: str,
+) -> Any:
+    """Revoke a refresh token.
+
+    Im not sure how to tell for sure if the refresh token got revoked, except to test a
+    refresh after revocation and see if it fails. The SSO returns a 200 OK response even
+    if the token is invalid or already revoked, so we have to rely on testing the token
+    after revocation to confirm it worked."""
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": user_agent,
+    }
+    payload: dict[str, str] = {
+        "token": refresh_token,
+        "token_type_hint": "refresh_token",
+        "client_id": client_id,
+    }
+    response = httpx2.post(revocation_endpoint, headers=headers, data=payload)
+    response.raise_for_status()
+    return response.json()
 
 
 async def async_request_token(
@@ -132,3 +177,104 @@ async def async_refresh_token(
     response.raise_for_status()
     result = await response.json()
     return result
+
+
+async def async_revoke_refresh_token(
+    refresh_token: str,
+    revocation_endpoint: str,
+    client_id: str,
+    user_agent: str,
+    client_session: httpx2.AsyncClient,
+) -> Any:
+    """Revoke a refresh token.
+
+    Im not sure how to tell for sure if the refresh token got revoked, except to test a
+    refresh after revocation and see if it fails. The SSO returns a 200 OK response even
+    if the token is invalid or already revoked, so we have to rely on testing the token
+    after revocation to confirm it worked.
+
+    Args:
+        refresh_token: The refresh token to revoke.
+        revocation_endpoint: The revocation endpoint URI.
+        client_id: The client ID of the application.
+        user_agent: The User-Agent string to use in the request.
+        client_session: The httpx2.AsyncClient session for making requests.
+
+    Raises:
+        httpx2.HTTPStatusError: If the revocation request fails.
+    """
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": user_agent,
+    }
+    payload: dict[str, str] = {
+        "token": refresh_token,
+        "token_type_hint": "refresh_token",
+        "client_id": client_id,
+    }
+
+    response = await client_session.post(
+        revocation_endpoint, headers=headers, data=payload
+    )
+    response.raise_for_status()
+    if response.status_code == 200:
+        logger.info("Token revoked successfully")
+
+
+def validate_jwt_token(
+    access_token: str,
+    jwks_client: PyJWKClient | None,
+    audience: str,
+    issuers: Sequence[str],
+    user_agent: str,
+    jwks_uri: str = "",
+) -> ValidatedTokenTD:
+    """Validates and decodes a JWT Token.
+
+    Args:
+        access_token: The JWT token to validate.
+        jwks_uri: The JWKS URI to fetch signing keys from.
+        jwks_client: An optional PyJWKClient instance to use for fetching keys.
+            If None, a new client will be created.
+        audience: Expected audience for the token.
+        issuers: Valid issuers for the token.
+        user_agent: The User-Agent string to use in requests.
+
+    Returns:
+        The content of the validated JWT access token.
+
+    Raises:
+        ValueError: If jwks_uri is not provided when jwks_client is None.
+        jwt.ExpiredSignatureError: If the token has expired.
+        jwt.InvalidTokenError: If the token is invalid.
+        Exception: If any other error occurs.
+    """
+    headers = {"User-Agent": user_agent}
+    # NOTE the jwks_client can cache the keys, so we dont have to fetch them every time.
+    # Pass in a jwks_client if you have one.
+    if jwks_client is None:
+        if not jwks_uri:
+            raise ValueError("jwks_uri must be provided if jwks_client is None")
+        jwks_client = PyJWKClient(jwks_uri, headers=headers)
+    unverified_header = get_unverified_header(access_token)
+    kid = unverified_header["kid"]
+    alg = unverified_header["alg"]
+    signing_key = jwks_client.get_signing_key(kid).key
+    try:
+        # Decode and validate the token
+        valid_decoded_token = decode(  # type: ignore
+            jwt=access_token,
+            key=signing_key,
+            algorithms=[alg],
+            audience=audience,
+            issuer=issuers,
+            options={"verify_aud": True, "verify_iss": True},
+        )
+
+        return ValidatedTokenTD(**valid_decoded_token)
+    except ExpiredSignatureError as e:
+        logger.error("Token has expired")
+        raise e
+    except Exception as e:
+        logger.error(f"Invalid token or other error: {e}")
+        raise e

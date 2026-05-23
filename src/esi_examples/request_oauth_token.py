@@ -1,11 +1,16 @@
+import json
 import logging
-from urllib.parse import urlencode
+import sys
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from esi_examples.helpers.code_challenge import generate_code_challenge_and_verifier
 from esi_examples.helpers.oauth_tokens import request_token
 from esi_examples.helpers.secure_random_string import generate_secure_random_string
-
-from .models.auth import AuthenticationRequestParams, EsiAppCredentials
+from esi_examples.models.auth import AuthenticationRequestParams, EsiAppCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +66,130 @@ def generate_request_params(
     )
 
 
-def start_web_server_and_listen_for_code(redirect_url: str, expected_state: str) -> str:
-    """Start a simple web server to listen for the callback with the authorization code."""
-    # This function needs to be implemented. It should start a web server that listens for the redirect URL,
-    # extract the authorization code and state from the query parameters, validate the state, and return the authorization code.
-    pass
+def start_web_server_and_listen_for_code(
+    redirect_url: str,
+    expected_state: str,
+    timeout_seconds: int = 300,
+) -> str:
+    """Listen for the OAuth callback and return the authorization code.
+
+    The HTTP server runs on a background thread and this function blocks until the
+    callback is received, an error occurs, or timeout is reached.
+    """
+    parsed_callback = urlparse(redirect_url)
+    if not parsed_callback.hostname:
+        raise ValueError("redirect_url must include a hostname")
+
+    callback_host = parsed_callback.hostname
+    callback_port = parsed_callback.port
+    if callback_port is None:
+        callback_port = 443 if parsed_callback.scheme == "https" else 80
+    callback_path = parsed_callback.path or "/"
+
+    result: dict[str, str | None] = {"code": None, "error": None}
+    callback_received = threading.Event()
+
+    class OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+        def _send_html(self, status_code: int, body: str) -> None:
+            encoded_body = body.encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded_body)))
+            self.end_headers()
+            self.wfile.write(encoded_body)
+
+        def do_GET(self) -> None:
+            parsed_request = urlparse(self.path)
+            if parsed_request.path != callback_path:
+                self._send_html(404, "<h1>Not Found</h1>")
+                return
+
+            query_params = parse_qs(parsed_request.query)
+            oauth_error = query_params.get("error", [None])[0]
+            oauth_error_description = query_params.get("error_description", [None])[0]
+            callback_state = query_params.get("state", [None])[0]
+            authorization_code = query_params.get("code", [None])[0]
+
+            if oauth_error:
+                description = oauth_error_description or "No description provided"
+                result["error"] = (
+                    f"OAuth authorization failed: {oauth_error} ({description})"
+                )
+                self._send_html(
+                    400,
+                    "<h1>Authorization Failed</h1><p>You can close this window and return to the terminal.</p>",
+                )
+                callback_received.set()
+                return
+
+            if not callback_state:
+                result["error"] = "Missing state in callback query parameters"
+                self._send_html(
+                    400,
+                    "<h1>Invalid Callback</h1><p>Missing state. You can close this window.</p>",
+                )
+                callback_received.set()
+                return
+
+            if callback_state != expected_state:
+                result["error"] = "State mismatch in OAuth callback"
+                self._send_html(
+                    400,
+                    "<h1>Invalid Callback</h1><p>State mismatch. You can close this window.</p>",
+                )
+                callback_received.set()
+                return
+
+            if not authorization_code:
+                result["error"] = (
+                    "Missing authorization code in callback query parameters"
+                )
+                self._send_html(
+                    400,
+                    "<h1>Invalid Callback</h1><p>Missing authorization code. You can close this window.</p>",
+                )
+                callback_received.set()
+                return
+
+            result["code"] = authorization_code
+            self._send_html(
+                200,
+                "<h1>Authorization Complete</h1><p>You can close this window and return to the terminal.</p>",
+            )
+            callback_received.set()
+
+    server = HTTPServer((callback_host, callback_port), OAuthCallbackHandler)
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name="oauth-callback-server",
+        kwargs={"poll_interval": 0.2},
+    )
+    server_thread.start()
+
+    try:
+        if not callback_received.wait(timeout=timeout_seconds):
+            raise TimeoutError(
+                f"Timed out after {timeout_seconds} seconds waiting for OAuth callback"
+            )
+
+        if result["error"]:
+            raise ValueError(result["error"])
+
+        if not result["code"]:
+            raise RuntimeError("OAuth callback completed without an authorization code")
+
+        return result["code"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
 
 
 if __name__ == "__main__":
     import argparse
-    import json
-    import sys
-    from pathlib import Path
 
     parser = argparse.ArgumentParser(
         description="Get Authorization code for ESI API Oauth Token."
@@ -95,7 +212,16 @@ if __name__ == "__main__":
         default=2,
         help="The number of spaces to use for indentation in the JSON output (default: %(default)s)",
     )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=300,
+        help="Seconds to wait for the OAuth callback before failing (default: %(default)s)",
+    )
     args = parser.parse_args()
+
+    if args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be greater than 0")
 
     # Read JSON input, either from file or stdin ('-' means stdin)
     if args.infile and args.infile != "-":
@@ -114,19 +240,41 @@ if __name__ == "__main__":
         scopes=credentials.scopes,
     )
 
-    # start a simple HTTP server to listen for the callback with the authorization code - needs function.
-    # auto open system webbrowser to the URL
-    # Once the authorization code is received, exchange it for an oauth token.
-    # output the oauth token as JSON to either the specified output file or stdout.
+    USER_AGENT = "esi-examples/0.1"
+    writing_to_file = args.output_file is not None
 
-    # # Write YAML output, either to file or stdout
-    # if args.output_file:
-    #     output_path = args.output_file
-    #     with output_path.open("w", encoding="utf-8") as f:
-    #         # yaml dumper already adds a newline at the end, so we don't need to add another one
-    #         f.write(yaml_output)
+    opened = webbrowser.open(auth_request_params.redirect_url)
+    if writing_to_file:
+        if opened:
+            print("Opened browser for authorization.")
+        else:
+            print("Could not automatically open browser. Visit this URL to continue:")
+            print(auth_request_params.redirect_url)
+    elif not opened:
+        print(
+            f"Could not automatically open browser. Visit this URL to continue: {auth_request_params.redirect_url}",
+            file=sys.stderr,
+        )
 
-    #     print(f"Converted YAML saved to {output_path.resolve()}")
-    # else:
-    #     # yaml dumper already adds a newline at the end, so we don't need to add another one
-    #     print(yaml_output, end="")
+    authorization_code = start_web_server_and_listen_for_code(
+        redirect_url=credentials.callbackUrl,
+        expected_state=auth_request_params.state,
+        timeout_seconds=args.timeout_seconds,
+    )
+    oauth_token = request_token(
+        client_id=credentials.clientId,
+        authorization_code=authorization_code,
+        code_verifier=auth_request_params.code_verifier,
+        token_endpoint=TOKEN_ENDPOINT,
+        user_agent=USER_AGENT,
+    )
+    json_output = json.dumps(oauth_token, indent=args.indent)
+
+    if args.output_file:
+        output_path = args.output_file
+        with output_path.open("w", encoding="utf-8") as f:
+            f.write(json_output)
+            f.write("\n")
+        print(f"OAuth token saved to {output_path.resolve()}")
+    else:
+        print(json_output, end="")

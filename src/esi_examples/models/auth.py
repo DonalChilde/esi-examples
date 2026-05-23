@@ -37,3 +37,28 @@ class OauthTokenTD(TypedDict):
     token_type: str
     expires_in: int
     refresh_token: str
+
+
+class ValidatedTokenTD(TypedDict):
+    """Represents a validated/decoded character token.
+
+    This information is extracted from the JWT access token after it has been validated.
+
+    The sub field contains the character ID in `CHARACTER:EVE:<character_id>` format,
+    the azp field contains the client ID, and the name field contains the character name.
+    """
+
+    scp: str
+    jti: str
+    kid: str
+    sub: str
+    azp: str
+    tenant: str
+    tier: str
+    region: str
+    aud: list[str]
+    name: str
+    owner: str
+    exp: int
+    iat: int
+    iss: str

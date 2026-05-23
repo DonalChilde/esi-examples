@@ -19,18 +19,18 @@ ESI_SCHEMA_CHANGELOG_URL = "https://esi.evetech.net/meta/changelog"
 """The URL to download the ESI schema changelog from."""
 
 
-class TimestampedSchema(TypedDict):
+class TimestampedSchemaChangelog(TypedDict):
     """The ESI schema changelog along with the nanosecond timestamp of when it was fetched."""
 
     schema: dict[str, Any]
     fetch_timestamp_nano: int
 
 
-def fetch_esi_schema_changelog(url: str | None = None) -> TimestampedSchema:
+def fetch_esi_schema_changelog(url: str | None = None) -> TimestampedSchemaChangelog:
     """Fetch the ESI schema changelog from the ESI_SCHEMA_CHANGELOG_URL and return it along with a timestamp.
 
     Returns:
-        TimestampedSchema: The ESI schema changelog along with the nanosecond timestamp of when it was fetched.
+        TimestampedSchemaChangelog: The ESI schema changelog along with the nanosecond timestamp of when it was fetched.
     """
     if url is None:
         url = ESI_SCHEMA_CHANGELOG_URL
@@ -38,7 +38,7 @@ def fetch_esi_schema_changelog(url: str | None = None) -> TimestampedSchema:
     response.raise_for_status()
     schema_changelog = response.json()
     fetch_timestamp_nano = Instant.now().timestamp_nanos()
-    return TimestampedSchema(
+    return TimestampedSchemaChangelog(
         schema=schema_changelog, fetch_timestamp_nano=fetch_timestamp_nano
     )
 
